@@ -7,7 +7,8 @@ What it does:
 
 - Renders the game in proper stereo for your headset, with full head tracking (you can lean and look around).
 - Shows menus, the HUD and dialogue on a large panel fixed in front of you, with a mouse pointer.
-- Shrinks the game window on your monitor while VR is running, to save GPU time. It goes back to normal afterwards.
+- While VR is running, your monitor shows what your left eye sees, in a smaller window. It goes back to normal
+  afterwards.
 
 Not affiliated with or endorsed by ION LANDS. The mod doesn't modify any game files (it's loaded by BepInEx) and
 doesn't touch DRM or Steam ownership checks.
@@ -75,6 +76,7 @@ To update to a new version, extract the new zip over the old one and let it repl
 | F11 | Start VR (for example if you launched the game without SteamVR running) |
 | F9  | Side-by-side 3D preview on the monitor (only when VR isn't running) |
 | F8  | Write a diagnostic report to the log (for bug reports) |
+| Shift+F8 | Turn texture logging on or off (for bug reports, see `ResourceStats` below) |
 
 ## Settings
 
@@ -85,19 +87,26 @@ game is closed.
 |---------|---------|---------|--------------|
 | VR | Enabled | true | Start VR automatically when the game launches (with SteamVR, only if it's already running) |
 | VR | RenderScale | 1.0 | Multiplier on the resolution SteamVR recommends. Changing the resolution in SteamVR works better. |
+| VR | SkipMonitorRender | true | Don't draw the game a third time for the monitor; the monitor shows the left eye instead. Only turn this off for troubleshooting: with it off, the picture goes black after about 15 minutes. |
 | UI | PanelDistance | 2.0 | How far away the menu panel is, in metres |
 | UI | PanelWidth | 2.6 | Menu panel width in metres |
 | UI | PanelHeightOffset | -0.1 | Panel height relative to your eyes, in metres |
 | UI | PanelResolutionScale | 1.0 | Menu sharpness compared to the headset's resolution |
-| Monitor | ShrinkWindowInVr | true | Use a small game window on the monitor while in VR (saves GPU time) |
+| Monitor | ShrinkWindowInVr | true | Use a small game window on the monitor while in VR, the same size as the menu panel in the headset (keeps the menus sharp) |
 | Stereo | PreviewEnabled | false | Side-by-side preview on the monitor when VR isn't running |
 | Debug | CaptureKey | false | Lets F6 save the current eye images to `BepInEx\NivalisVR-captures` (for bug reports) |
+| Debug | ResourceStats | false | Every 5 seconds, write to the log how many textures the game creates (for bug reports). Shift+F8 also turns it on or off. |
 
 ## Troubleshooting
 
 - Nothing shows up in the headset: make sure SteamVR (or your headset's software) was running before the game, or
   press F11. Also check that it's set as the active OpenXR runtime (in SteamVR: Settings, OpenXR,
   "Set SteamVR as OpenXR Runtime").
+- After about 15 minutes in VR the picture goes black in the headset and on the monitor, but menus still work: that
+  was a bug in version 0.4.0, fixed in 0.4.1. Update to the latest version (see Install).
+- The mod doesn't seem to load at all (no VR, and `BepInEx\LogOutput.log` is missing or ends with errors): your
+  antivirus may have removed a BepInEx file, most often `BepInEx\core\dobby.dll`. That's a false positive on a
+  standard BepInEx file. Restore it from your antivirus quarantine, or extract the zip again and allow the files.
 - Something else is wrong: open an issue on GitHub, describe what happened, and paste the contents of
   `BepInEx\LogOutput.log` (open it in Notepad and copy the text). The log can include your Windows user name in file
   paths, so feel free to replace it before posting.

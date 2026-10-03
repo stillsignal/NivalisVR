@@ -13,10 +13,10 @@ namespace NivalisVR;
 /// Renders the game's main camera once per eye, either for the headset (OpenXR, milestone 3) or as a
 /// side-by-side preview on the flat screen (milestone 2, used when VR isn't running).
 ///
-/// The game's own render of MainCamera is left untouched so gameplay code (Camera.main, ScreenPointToRay, etc.)
-/// sees exactly what it expects. This component lives on our own display camera (depth 100). When that camera is
-/// about to cull (after MainCamera's normal render, and after Cinemachine has positioned it), we temporarily move
-/// MainCamera to each eye's pose, point it at an eye RenderTexture, call Render(), then restore it.
+/// This component lives on our own display camera (depth 100). When that camera is about to cull (after Cinemachine
+/// has positioned MainCamera), we temporarily move MainCamera to each eye's pose, point it at an eye RenderTexture,
+/// call Render(), then restore it. While VR runs, MainCamera's own render produces the left eye instead of the
+/// monitor view (see OnFrameStart); gameplay code (Camera.main, ScreenPointToRay, etc.) never sees the change.
 /// </summary>
 public class StereoRenderer : MonoBehaviour
 {
@@ -49,6 +49,43 @@ public class StereoRenderer : MonoBehaviour
     private readonly RenderTexture[] _vrSubmit = new RenderTexture[2];
     private bool _vrInitAttempted;
     private bool _loggedFirstVrFrame;
+
+    // While VR runs, MainCamera's own render for the monitor is replaced by the eye renders. An empty camera of ours
+    // renders before every other camera each frame (depth -1000, into a tiny texture); in its pre-cull we locate the
+    // headset frame and point MainCamera at the left eye (pose, lens, eye texture). In practice (Unity 2020.3) Unity
+    // then skips MainCamera's own render for that frame, apparently because its target changed after the frame's
+    // camera list was set up, so our display camera renders both eyes and copies the left eye to the monitor. Should
+    // Unity render it anyway, that render is used as the left eye (onPostRender). Either way MainCamera only renders
+    // at eye size, and it's put back exactly as it was before game code runs again (verified: with Shift+F9 its own
+    // render resumes immediately). (Application.onBeforeRender would be the natural hook, but it's stripped from
+    // this game's build.)
+    // Besides saving a whole render per frame, this keeps MainCamera at a single render size. Some of the game's
+    // effects (the Hx light shafts and at least one other) build new render textures on every size change and never
+    // destroy the old ones; switching between eye and monitor size twice per frame used up Unity's graphics resource
+    // IDs after ~15 minutes (black scene until restart, "Resource ID out of range" in Player.log).
+    internal static ConfigEntry<bool> VrSkipMonitorRender;
+    private Camera _frameStart;                // the empty camera whose pre-cull starts each VR frame
+    private RenderTexture _frameStartTarget;
+    private int _frameStartFrame = -1;         // Time.frameCount of its last pre-cull
+    private Camera.CameraCallback _postRenderCallback;
+    private int _pendingSlot = -1;             // headset frame located at frame start, finished at our display camera
+    private Camera _pendingCamera;             // MainCamera for that frame
+    private Camera _leftEyeCamera;             // MainCamera while it's set up to render the left eye itself
+    private Vector3 _leftEyeBasePosition;
+    private Quaternion _leftEyeBaseRotation;
+    private RenderTexture _leftEyeOriginalTarget;
+    private LensState _leftEyeOriginalLens;
+    private XrFovf _leftEyeFov;
+    private bool _leftEyeCompanionsRendered;
+    private bool _leftEyeRendered;             // MainCamera's own render produced this frame's left eye
+    private CommandBuffer _monitorBlit;        // left eye -> monitor while MainCamera renders the left eye
+    private bool _monitorBlitAttached;
+    private Texture _monitorBlitSource;
+    private int _monitorBlitScreenWidth, _monitorBlitScreenHeight;
+    private bool _loggedLeftEyeByGame, _loggedLeftEyeMissed, _loggedFrameStartFallback;
+    private static bool _manualRender;         // inside one of our own Camera.Render() calls (diagnostics)
+    private bool _gameRenderForced;            // Shift+F9: game camera's own monitor render back on (diagnostics)
+    private Camera _mainCameraThisFrame;       // Camera.main as of this frame's Update (diagnostics)
 
     // UI panel: the game's overlay UI is redirected into a texture (UiRedirect), flipped into _uiSubmit,
     // and shown in the headset as a quad layer fixed in tracking space in front of the recentered view.
@@ -83,6 +120,10 @@ public class StereoRenderer : MonoBehaviour
             "Multiplier on the runtime's recommended per-eye resolution (1.0 = exactly what SteamVR recommends for this app; set the resolution in SteamVR or a SteamVR add-on instead).");
         VrFlipY = config.Bind("VR", "FlipY", true,
             "Flip eye images vertically before submitting. Unity stores D3D11 render textures bottom-up; turn off if the headset image is upside down.");
+        VrSkipMonitorRender = config.Bind("VR", "SkipMonitorRender", true,
+            "While VR runs, don't render the game a third time for the monitor; the monitor shows the left eye instead. " +
+            "Faster, and avoids a texture leak in the game's effects that turned the picture black after ~15 minutes. " +
+            "Only turn off for troubleshooting.");
         UiPanelDistance = config.Bind("UI", "PanelDistance", 2.0f,
             "Distance in metres from your head (at recenter) to the menu/HUD panel.");
         UiPanelWidth = config.Bind("UI", "PanelWidth", 2.6f,
@@ -92,6 +133,7 @@ public class StereoRenderer : MonoBehaviour
         CaptureKeyEnabled = config.Bind("Debug", "CaptureKey", false,
             "F6 saves the current eye images (and the game's sky/glow helper textures) as PNG files in " +
             "BepInEx/NivalisVR-captures, for bug reports.");
+        ResourceStats.BindConfig(config);
         VrWindow.BindConfig(config);
     }
 
@@ -131,6 +173,30 @@ public class StereoRenderer : MonoBehaviour
             Plugin.Logger.LogError($"Stereo renderer: failed to hook Camera.onPreCull: {e}");
         }
 
+        try
+        {
+            _postRenderCallback = (Camera.CameraCallback)(Action<Camera>)OnAnyCameraPostRender;
+            Camera.onPostRender = Camera.onPostRender == null ? _postRenderCallback : Camera.onPostRender + _postRenderCallback;
+
+            var frameStartObject = new GameObject("NivalisVR_FrameStart");
+            frameStartObject.transform.SetParent(transform, false);
+            _frameStart = frameStartObject.AddComponent<Camera>();
+            _frameStart.depth = -1000;
+            _frameStart.cullingMask = 0;
+            _frameStart.clearFlags = CameraClearFlags.Nothing;
+            _frameStart.renderingPath = RenderingPath.Forward;
+            _frameStart.allowHDR = false;
+            _frameStart.allowMSAA = false;
+            _frameStart.useOcclusionCulling = false;
+            _frameStartTarget = CreateTarget("NivalisVR_FrameStartTarget", 4, 4, 0);
+            _frameStart.targetTexture = _frameStartTarget;
+            Plugin.Logger.LogInfo("Stereo renderer: frame-start camera created, onPostRender hooked");
+        }
+        catch (Exception e)
+        {
+            Plugin.Logger.LogError($"Stereo renderer: frame-start setup failed (the game's own render can't become the left eye): {e}");
+        }
+
         _ui = new UiRedirect();
         _ui.TextureCreated += OnUiTextureCreated;
     }
@@ -142,6 +208,11 @@ public class StereoRenderer : MonoBehaviour
             Camera.onPreCull = Camera.onPreCull - _preCullCallback;
         if (_preRenderCallback != null && Camera.onPreRender != null)
             Camera.onPreRender = Camera.onPreRender - _preRenderCallback;
+        if (_postRenderCallback != null && Camera.onPostRender != null)
+            Camera.onPostRender = Camera.onPostRender - _postRenderCallback;
+        RestoreLeftEyeCamera();
+        ReleaseMonitorBlit();
+        DestroyTarget(_frameStartTarget);
         ReleasePreviewTargets();
         for (var eye = 0; eye < 2; eye++)
         {
@@ -153,6 +224,10 @@ public class StereoRenderer : MonoBehaviour
 
     private void Update()
     {
+        // Normally restored right after MainCamera renders; never leave it set up for the eye into game logic.
+        RestoreLeftEyeCamera();
+        _mainCameraThisFrame = Camera.main;
+
         if (!_vrInitAttempted && VrEnabled.Value)
         {
             _vrInitAttempted = true;
@@ -162,6 +237,7 @@ public class StereoRenderer : MonoBehaviour
 
         VrSession.PollEvents();
         HandleHotkeys();
+        ResourceStats.Update(VrSession.IsRunning);
 
         try
         {
@@ -185,10 +261,19 @@ public class StereoRenderer : MonoBehaviour
         var keyboard = Keyboard.current;
         if (keyboard == null) return;
 
-        if (keyboard.f9Key.wasPressedThisFrame)
+        if (keyboard.f9Key.wasPressedThisFrame && !keyboard.shiftKey.isPressed)
         {
             PreviewEnabled.Value = !PreviewEnabled.Value;
             Plugin.Logger.LogInfo($"Side-by-side preview {(PreviewEnabled.Value ? "enabled" : "disabled")}");
+        }
+
+        // Diagnostics (not saved): switch the game camera's own monitor render back on while VR runs, to compare.
+        if (keyboard.f9Key.wasPressedThisFrame && keyboard.shiftKey.isPressed)
+        {
+            _gameRenderForced = !_gameRenderForced;
+            Plugin.Logger.LogInfo(_gameRenderForced
+                ? "VR: game camera's own monitor render switched back on (Shift+F9, diagnostics)"
+                : "VR: game camera renders the left eye again; the monitor shows the left eye (Shift+F9)");
         }
 
         if (keyboard.f10Key.wasPressedThisFrame)
@@ -203,6 +288,9 @@ public class StereoRenderer : MonoBehaviour
             Plugin.Logger.LogInfo($"Capture requested ({_captureName}), saving to {DebugCapture.Folder}");
         }
 
+        if (keyboard.f8Key.wasPressedThisFrame && keyboard.shiftKey.isPressed)
+            ResourceStats.Toggle();
+
         if (keyboard.f11Key.wasPressedThisFrame && !VrSession.IsInitialized)
         {
             Plugin.Logger.LogInfo("VR: starting VR (F11)");
@@ -210,18 +298,223 @@ public class StereoRenderer : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Pre-cull of our frame-start camera: after all game logic (Update/LateUpdate, Cinemachine) and before any other
+    /// camera renders. Locates the headset frame and sets MainCamera up to render the left eye itself.
+    /// </summary>
+    [HideFromIl2Cpp]
+    private void OnFrameStart()
+    {
+        _frameStartFrame = Time.frameCount;
+        var leftEyeByGame = false;
+        try
+        {
+            FlushPendingFrame();
+            RestoreLeftEyeCamera();
+            if (!VrSession.IsRunning) return;
+
+            var cam = Camera.main;
+            if (cam == null) return;
+
+            var slot = VrSession.WaitAndLocate();
+            if (slot < 0) return;
+            _pendingSlot = slot;
+            _pendingCamera = cam;
+
+            ref var frame = ref VrSession.GetSlot(slot);
+            if (!frame.ShouldRender) return;
+
+            ResourceStats.FrameStart();
+            EnsureVrTargets();
+            UpdateHeadPose(frame.Left, frame.Right);
+
+            // A debug capture (F6) takes the separate-render path, which saves each eye's helper textures.
+            if (VrSkipMonitorRender.Value && !_gameRenderForced && _captureName == null)
+            {
+                SetUpLeftEyeAsGameRender(cam, frame.Left);
+                leftEyeByGame = true;
+            }
+        }
+        catch (Exception e)
+        {
+            Plugin.Logger.LogError($"VR: frame start failed: {e}");
+            RestoreLeftEyeCamera();
+            leftEyeByGame = false;
+        }
+        finally
+        {
+            SetMonitorBlitAttached(leftEyeByGame);
+        }
+    }
+
+    /// <summary>Points MainCamera's upcoming render at the left eye: eye pose, eye lens, eye texture.</summary>
+    [HideFromIl2Cpp]
+    private void SetUpLeftEyeAsGameRender(Camera cam, XrView view)
+    {
+        var t = cam.transform;
+        _leftEyeBasePosition = t.position;
+        _leftEyeBaseRotation = t.rotation;
+        _leftEyeOriginalTarget = cam.targetTexture;
+        _leftEyeOriginalLens = LensState.Save(cam);
+        _leftEyeFov = view.fov;
+        _leftEyeCompanionsRendered = false;
+        _leftEyeRendered = false;
+        _leftEyeCamera = cam;
+
+        ApplyEyePose(t, view, _leftEyeBasePosition, _leftEyeBaseRotation);
+        ApplyEyeLens(cam, view.fov, ProjectionFromFov(view.fov, cam.nearClipPlane, cam.farClipPlane));
+        FindCompanionCameras(cam);
+        cam.targetTexture = EyeTarget(0);
+
+        if (!_loggedLeftEyeByGame)
+        {
+            _loggedLeftEyeByGame = true;
+            Plugin.Logger.LogInfo($"VR: '{cam.name}' is only rendered for the eyes (no separate monitor render); the monitor shows the left eye");
+        }
+    }
+
+    /// <summary>Puts MainCamera back exactly as the game left it (no-op unless it's set up for the left eye).</summary>
+    [HideFromIl2Cpp]
+    private void RestoreLeftEyeCamera()
+    {
+        var cam = _leftEyeCamera;
+        _leftEyeCamera = null;
+        if (ReferenceEquals(cam, null)) return;
+
+        if (cam != null)
+        {
+            cam.targetTexture = _leftEyeOriginalTarget;
+            _leftEyeOriginalLens.Restore(cam);
+            cam.transform.position = _leftEyeBasePosition;
+            cam.transform.rotation = _leftEyeBaseRotation;
+        }
+        RestoreCompanionCameras();
+    }
+
+    /// <summary>
+    /// A headset frame that was located but never rendered (our display camera didn't run) is submitted empty,
+    /// so every xrWaitFrame stays paired with xrBeginFrame/xrEndFrame.
+    /// </summary>
+    [HideFromIl2Cpp]
+    private void FlushPendingFrame()
+    {
+        if (_pendingSlot < 0) return;
+        var slot = _pendingSlot;
+        _pendingSlot = -1;
+        _pendingCamera = null;
+        VrSession.GetSlot(slot).ShouldRender = false;
+        VrSession.Submit(slot);
+    }
+
     [HideFromIl2Cpp]
     private void OnAnyCameraPreCull(Camera culling)
     {
+        if (!_manualRender && !ReferenceEquals(_mainCameraThisFrame, null) && culling == _mainCameraThisFrame)
+            ResourceStats.GameCameraRenders++;
+
+        if (culling == _frameStart)
+        {
+            OnFrameStart();
+            return;
+        }
+
+        // MainCamera's own render is about to produce the left eye. The game's helper cameras (sky, glow) have
+        // rendered their mono view by now, so redo them for the left eye, as for every eye render.
+        if (!ReferenceEquals(_leftEyeCamera, null) && culling == _leftEyeCamera && !_leftEyeCompanionsRendered)
+        {
+            _leftEyeCompanionsRendered = true;
+            RenderCompanionCameras(_leftEyeFov);
+            return;
+        }
+
         if (culling != _display) return;
 
-        var cam = Camera.main;
-        if (cam == null) return;
+        if (VrSession.IsRunning || _pendingSlot >= 0)
+        {
+            int slot;
+            Camera cam;
+            var frameStarted = _frameStartFrame == Time.frameCount;
+            var leftEyeByGame = false;
+            if (frameStarted)
+            {
+                // Normal path: the frame was located at frame start; MainCamera has rendered (and its image effects
+                // have run) by now, so it's safe to put it back.
+                slot = _pendingSlot;
+                cam = _pendingCamera;
+                _pendingSlot = -1;
+                _pendingCamera = null;
+                leftEyeByGame = _leftEyeRendered;
+                if (leftEyeByGame)
+                {
+                    ResourceStats.LeftEyeByGame++;
+                }
+                else if (!ReferenceEquals(_leftEyeCamera, null))
+                {
+                    // Set up for the left eye, but its own render didn't produce it: either Unity didn't render
+                    // MainCamera this frame, or it did and we didn't see the render finish.
+                    var renderedUnseen = _leftEyeCompanionsRendered;
+                    if (renderedUnseen) ResourceStats.LeftEyeUndetected++;
+                    else ResourceStats.LeftEyeSeparate++;
+                    if (!_loggedLeftEyeMissed)
+                    {
+                        _loggedLeftEyeMissed = true;
+                        if (renderedUnseen)
+                            Plugin.Logger.LogWarning("VR: the game camera rendered, but the end of its render wasn't seen; rendering the left eye again");
+                        else
+                            Plugin.Logger.LogInfo("VR: Unity skips the game camera's own render (as expected); the left eye is rendered separately");
+                    }
+                }
+                RestoreLeftEyeCamera();
+            }
+            else
+            {
+                // Fallback if our frame-start camera didn't run: locate now and render both eyes ourselves.
+                if (!_loggedFrameStartFallback)
+                {
+                    _loggedFrameStartFallback = true;
+                    Plugin.Logger.LogWarning("VR: frame-start camera didn't run this frame; rendering both eyes after the game's own render (old behaviour)");
+                }
+                SetMonitorBlitAttached(false);
+                cam = Camera.main;
+                slot = cam != null ? WaitAndLocateLogged() : -1;
+            }
+            _leftEyeRendered = false;
+            if (slot >= 0) RenderVrFrame(cam, slot, leftEyeByGame, frameStarted);
+            return;
+        }
 
-        if (VrSession.IsRunning)
-            RenderVrFrame(cam);
-        else if (PreviewEnabled.Value)
-            RenderPreviewFrame(cam);
+        if (PreviewEnabled.Value)
+        {
+            var cam = Camera.main;
+            if (cam != null) RenderPreviewFrame(cam);
+        }
+    }
+
+    /// <summary>
+    /// Notes that MainCamera's own render produced the left eye. Its image effects still run after this callback
+    /// (OnRenderImage), so MainCamera is only put back at our display camera.
+    /// </summary>
+    [HideFromIl2Cpp]
+    private void OnAnyCameraPostRender(Camera rendered)
+    {
+        if (ReferenceEquals(_leftEyeCamera, null) || rendered != _leftEyeCamera || !_leftEyeCompanionsRendered || _leftEyeRendered)
+            return;
+        _leftEyeRendered = true;
+        ResourceStats.Mark("left eye (game's own render)");
+    }
+
+    [HideFromIl2Cpp]
+    private static int WaitAndLocateLogged()
+    {
+        try
+        {
+            return VrSession.WaitAndLocate();
+        }
+        catch (Exception e)
+        {
+            Plugin.Logger.LogError($"VR: wait/locate failed: {e}");
+            return -1;
+        }
     }
 
     [HideFromIl2Cpp]
@@ -250,31 +543,33 @@ public class StereoRenderer : MonoBehaviour
     // ---------------------------------------------------------------- headset
 
     [HideFromIl2Cpp]
-    private void RenderVrFrame(Camera cam)
+    private void RenderVrFrame(Camera cam, int slot, bool leftEyeByGame, bool frameStarted)
     {
-        int slot;
-        try
-        {
-            slot = VrSession.WaitAndLocate();
-        }
-        catch (Exception e)
-        {
-            Plugin.Logger.LogError($"VR: wait/locate failed: {e}");
-            return;
-        }
-        if (slot < 0) return;
-
-        // From here on the frame must be submitted (even empty) so begin/end stay balanced with xrWaitFrame.
+        // The located frame must be submitted (even empty) so begin/end stay balanced with xrWaitFrame.
         try
         {
             ref var frame = ref VrSession.GetSlot(slot);
-            if (frame.ShouldRender)
+            if (frame.ShouldRender && cam != null)
             {
-                EnsureVrTargets();
-                UpdateHeadPose(frame.Left, frame.Right);
+                if (!frameStarted)
+                {
+                    ResourceStats.FrameStart();
+                    EnsureVrTargets();
+                    UpdateHeadPose(frame.Left, frame.Right);
+                }
 
-                RenderVrEye(cam, frame.Left, 0);
+                if (leftEyeByGame)
+                {
+                    // MainCamera's own render already drew the left eye into its eye texture.
+                    if (VrFlipY.Value) Graphics.Blit(_vrEye[0], _vrSubmit[0], new Vector2(1f, -1f), new Vector2(0f, 1f));
+                }
+                else
+                {
+                    RenderVrEye(cam, frame.Left, 0);
+                    ResourceStats.Mark("left eye");
+                }
                 RenderVrEye(cam, frame.Right, 1);
+                ResourceStats.Mark("right eye");
                 _captureName = null;
 
                 if (_ui.Active && _uiSourceReady && _ui.Texture != null)
@@ -356,17 +651,11 @@ public class StereoRenderer : MonoBehaviour
         var baseRotation = t.rotation;
         var originalTarget = cam.targetTexture;
 
-        // Head pose relative to the recentered origin, applied on top of the game camera.
-        var inverseOrigin = Quaternion.Inverse(_originRotation);
-        var localPosition = inverseOrigin * (ToUnityPosition(view.pose.position) - _originPosition);
-        var localRotation = inverseOrigin * ToUnityRotation(view.pose.orientation);
-
-        var target = VrFlipY.Value ? _vrEye[eye] : _vrSubmit[eye];
+        var target = EyeTarget(eye);
         var originalLens = LensState.Save(cam);
         try
         {
-            t.position = basePosition + baseRotation * localPosition;
-            t.rotation = baseRotation * localRotation;
+            ApplyEyePose(t, view, basePosition, baseRotation);
 
             // Something in the game's camera stack (PPv2's PostProcessLayer.OnPreCull, at least) calls
             // Camera.ResetProjectionMatrix() before every render, so an explicit projectionMatrix gets thrown away.
@@ -389,7 +678,15 @@ public class StereoRenderer : MonoBehaviour
             }
 
             cam.targetTexture = target;
-            cam.Render();
+            _manualRender = true;
+            try
+            {
+                cam.Render();
+            }
+            finally
+            {
+                _manualRender = false;
+            }
 
             if (_captureName != null)
             {
@@ -411,6 +708,21 @@ public class StereoRenderer : MonoBehaviour
         if (VrFlipY.Value)
             Graphics.Blit(_vrEye[eye], _vrSubmit[eye], new Vector2(1f, -1f), new Vector2(0f, 1f));
     }
+
+    /// <summary>Head pose relative to the recentered origin, applied on top of the game camera's own pose.</summary>
+    [HideFromIl2Cpp]
+    private void ApplyEyePose(Transform t, XrView view, Vector3 basePosition, Quaternion baseRotation)
+    {
+        var inverseOrigin = Quaternion.Inverse(_originRotation);
+        var localPosition = inverseOrigin * (ToUnityPosition(view.pose.position) - _originPosition);
+        var localRotation = inverseOrigin * ToUnityRotation(view.pose.orientation);
+        t.position = basePosition + baseRotation * localPosition;
+        t.rotation = baseRotation * localRotation;
+    }
+
+    /// <summary>The texture MainCamera renders an eye into (flipped into _vrSubmit afterwards when FlipY is on).</summary>
+    [HideFromIl2Cpp]
+    private RenderTexture EyeTarget(int eye) => VrFlipY.Value ? _vrEye[eye] : _vrSubmit[eye];
 
     // Child cameras of MainCamera that render into textures the main view samples in screen space
     // (SkyboxCamera -> the global sky texture used by e.g. water/fog; BoidGlowCamera -> flock glow).
@@ -578,6 +890,63 @@ public class StereoRenderer : MonoBehaviour
         return m;
     }
 
+    // ---------------------------------------------------------------- monitor view in VR
+
+    /// <summary>
+    /// While MainCamera renders the left eye instead of the monitor view, our display camera copies the left eye to
+    /// the monitor, cropped around its centre to the window's shape. The UI is drawn on top by UiRedirect's canvas.
+    /// </summary>
+    [HideFromIl2Cpp]
+    private void SetMonitorBlitAttached(bool attached)
+    {
+        if (attached)
+        {
+            var source = EyeTarget(0);
+            if (source == null)
+                attached = false;
+            else if (_monitorBlit == null || source != _monitorBlitSource ||
+                     Screen.width != _monitorBlitScreenWidth || Screen.height != _monitorBlitScreenHeight)
+                BuildMonitorBlit(source);
+        }
+
+        if (attached == _monitorBlitAttached || _monitorBlit == null) return;
+        if (attached) _display.AddCommandBuffer(CameraEvent.AfterEverything, _monitorBlit);
+        else _display.RemoveCommandBuffer(CameraEvent.AfterEverything, _monitorBlit);
+        _monitorBlitAttached = attached;
+    }
+
+    [HideFromIl2Cpp]
+    private void BuildMonitorBlit(RenderTexture source)
+    {
+        ReleaseMonitorBlit();
+
+        var sourceAspect = (float)source.width / source.height;
+        var screenAspect = (float)Screen.width / Mathf.Max(1, Screen.height);
+        var scale = Vector2.one;
+        if (screenAspect > sourceAspect) scale.y = sourceAspect / screenAspect; // wide window: full width, middle band
+        else scale.x = screenAspect / sourceAspect;
+        var offset = new Vector2((1f - scale.x) * 0.5f, (1f - scale.y) * 0.5f);
+
+        _monitorBlit = new CommandBuffer();
+        _monitorBlit.name = "NivalisVR monitor view (left eye)";
+        _monitorBlit.Blit(source, new RenderTargetIdentifier(BuiltinRenderTextureType.CameraTarget), scale, offset);
+        _monitorBlitSource = source;
+        _monitorBlitScreenWidth = Screen.width;
+        _monitorBlitScreenHeight = Screen.height;
+    }
+
+    [HideFromIl2Cpp]
+    private void ReleaseMonitorBlit()
+    {
+        if (_monitorBlit == null) return;
+        if (_monitorBlitAttached && _display != null)
+            _display.RemoveCommandBuffer(CameraEvent.AfterEverything, _monitorBlit);
+        _monitorBlit.Release();
+        _monitorBlit = null;
+        _monitorBlitAttached = false;
+        _monitorBlitSource = null;
+    }
+
     // ---------------------------------------------------------------- flat side-by-side preview
 
     [HideFromIl2Cpp]
@@ -616,12 +985,14 @@ public class StereoRenderer : MonoBehaviour
         t.position = originalPos + t.right * (side * Ipd.Value);
         cam.targetTexture = target;
         cam.aspect = (float)target.width / target.height;
+        _manualRender = true;
         try
         {
             cam.Render();
         }
         finally
         {
+            _manualRender = false;
             cam.targetTexture = originalTarget;
             cam.ResetAspect();
             t.position = originalPos;

@@ -5,6 +5,7 @@
 #   BEPINEX_DIR      unpacked BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.788 zip (pristine, never run)
 #   BEPINEX_LICENSE  BepInEx LICENSE (LGPL-2.1) at commit 5b766a3
 #   OPENXR_DIR       folder with openxr_loader.dll (x64) and the OpenXR SDK LICENSE (release 1.1.63)
+#   DIST_DIR         output folder (default: dist/)
 #
 # The zip contains only: BepInEx core + its .NET runtime + doorstop files, our plugin, the OpenXR loader,
 # license/notice files and the README. Never game files, interop assemblies, configs or unity-libs.
@@ -14,6 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BEPINEX_DIR="${BEPINEX_DIR:-$ROOT/tools/BepInEx-be.788}"
 BEPINEX_LICENSE="${BEPINEX_LICENSE:-$ROOT/tools/BepInEx-LICENSE.txt}"
 OPENXR_DIR="${OPENXR_DIR:-$ROOT/tools/openxr-1.1.63}"
+DIST_DIR="${DIST_DIR:-$ROOT/dist}"
 
 VERSION="$(sed -n 's/.*public const string Version = "\([^"]*\)".*/\1/p' "$ROOT/src/NivalisVR/Plugin.cs")"
 [ -n "$VERSION" ] || { echo "Could not read Version from Plugin.cs" >&2; exit 1; }
@@ -28,8 +30,8 @@ dotnet build "$ROOT/src/NivalisVR" -c Release --nologo -v quiet
 PLUGIN_DLL="$ROOT/src/NivalisVR/bin/Release/NivalisVR.dll"
 
 NAME="NivalisVR-$VERSION"
-STAGE="$ROOT/dist/$NAME"
-ZIP="$ROOT/dist/$NAME.zip"
+STAGE="$DIST_DIR/$NAME"
+ZIP="$DIST_DIR/$NAME.zip"
 rm -rf "$STAGE" "$ZIP"
 mkdir -p "$STAGE/BepInEx/plugins/NivalisVR/licenses" "$STAGE/BepInEx/patchers"
 
@@ -49,9 +51,15 @@ cp "$ROOT/THIRD-PARTY-NOTICES.md" "$STAGE/BepInEx/plugins/NivalisVR/licenses/"
 cp "$BEPINEX_LICENSE" "$STAGE/BepInEx/plugins/NivalisVR/licenses/BepInEx-LICENSE.txt"
 cp "$OPENXR_DIR/LICENSE" "$STAGE/BepInEx/plugins/NivalisVR/licenses/OpenXR-SDK-LICENSE.txt"
 
+# Neutral timestamps: every entry's modification time is the last commit's time, and the zip is written with TZ=UTC0
+# so its local-time field matches its UTC field (otherwise the pair reveals the builder's timezone). Access/creation
+# times in the local headers are still the build time (UTC), so rebuilds aren't byte-identical.
+EPOCH="$(git -C "$ROOT" log -1 --format=%ct)"
+find "$STAGE" -exec touch -h -d "@$EPOCH" {} +
+
 # Windows' bsdtar writes zip archives (Git Bash's GNU tar can't).
 WIN_TAR="/c/Windows/System32/tar.exe"
-( cd "$STAGE" && "$WIN_TAR" -a -c -f "$(cygpath -w "$ZIP")" * .doorstop_version )
+( cd "$STAGE" && TZ=UTC0 "$WIN_TAR" -a -c -f "$(cygpath -w "$ZIP")" * .doorstop_version )
 
 echo "Created $ZIP"
 "$WIN_TAR" -t -f "$(cygpath -w "$ZIP")" | grep -v '/$' | grep -v '^dotnet/' | grep -v '^BepInEx/core/'

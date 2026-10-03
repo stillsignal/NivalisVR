@@ -37,7 +37,8 @@ public class CameraDumper : MonoBehaviour
             {
                 // The game has legacy UnityEngine.Input disabled; only the Input System works.
                 var keyboard = Keyboard.current;
-                if (keyboard != null && keyboard.f8Key.wasPressedThisFrame)
+                // Shift+F8 toggles the resource stats instead (StereoRenderer).
+                if (keyboard != null && keyboard.f8Key.wasPressedThisFrame && !keyboard.shiftKey.isPressed)
                     ScheduleDump("F8 pressed", 0f);
             }
             catch (Exception e)
