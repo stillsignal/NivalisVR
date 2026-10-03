@@ -1,0 +1,34 @@
+# Game files and anything derived from them, never commit
+game-copy/
+decompiled/
+tools/
+
+# Safety net: game binaries, BepInEx output, interop assemblies, extracted assets
+# (in case any of these ever end up outside the folders above)
+*.exe
+BepInEx/
+interop/
+unity-libs/
+*.assets
+*.resS
+*.resource
+*.bundle
+*.unity3d
+global-metadata.dat
+*.log
+
+# Build output
+bin/
+obj/
+*.dll
+*.pdb
+
+# Editor/OS clutter
+.vs/
+.vscode/
+*.user
+Thumbs.db
+.idea/
+
+# Release builds
+dist/

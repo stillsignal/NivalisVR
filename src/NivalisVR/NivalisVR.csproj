@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- BepInEx 6 IL2CPP runs plugins on its bundled .NET 6 runtime. -->
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>NivalisVR</AssemblyName>
+    <RootNamespace>NivalisVR</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <DebugType>embedded</DebugType>
+    <!-- Published builds must not reveal local folders: source paths in the embedded PDB become /_/src/NivalisVR/...,
+         and the private repo's commit hash is left out of the version string. -->
+    <PathMap>$(MSBuildProjectDirectory)=/_/src/NivalisVR</PathMap>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+
+    <!-- Game and interop DLLs are referenced in place from game-copy (never copied into src). -->
+    <GameDir>$(MSBuildThisFileDirectory)..\..\game-copy\</GameDir>
+    <BepInExDir>$(GameDir)BepInEx\</BepInExDir>
+    <InteropDir>$(BepInExDir)interop\</InteropDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="$(BepInExDir)core\BepInEx.Core.dll" Private="false" />
+    <Reference Include="$(BepInExDir)core\BepInEx.Unity.IL2CPP.dll" Private="false" />
+    <Reference Include="$(BepInExDir)core\Il2CppInterop.Runtime.dll" Private="false" />
+    <Reference Include="$(InteropDir)Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="$(InteropDir)UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="$(InteropDir)Unity.InputSystem.dll" Private="false" />
+    <Reference Include="$(InteropDir)Unity.Postprocessing.Runtime.dll" Private="false" />
+    <Reference Include="$(InteropDir)Cinemachine.dll" Private="false" />
+    <Reference Include="$(InteropDir)UnityEngine.UIModule.dll" Private="false" />
+    <Reference Include="$(InteropDir)UnityEngine.ImageConversionModule.dll" Private="false" />
+    <Reference Include="$(InteropDir)UnityEngine.UI.dll" Private="false" />
+  </ItemGroup>
+
+  <!-- Install: copy only our plugin DLL into game-copy/BepInEx/plugins/NivalisVR
+       (openxr_loader.dll lives next to it; it is placed there manually from tools/). -->
+  <Target Name="CopyToPlugins" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(BepInExDir)plugins\NivalisVR\" />
+    <Message Importance="high" Text="Installed $(TargetFileName) to $(BepInExDir)plugins\NivalisVR\" />
+  </Target>
+
+</Project>
