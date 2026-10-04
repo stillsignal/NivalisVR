@@ -102,6 +102,9 @@ game is closed.
 - Nothing shows up in the headset: make sure SteamVR (or your headset's software) was running before the game, or
   press F11. Also check that it's set as the active OpenXR runtime (in SteamVR: Settings, OpenXR,
   "Set SteamVR as OpenXR Runtime").
+- When you start the game from Steam while SteamVR is running, SteamVR may show a "VR Theater Screen" message,
+  because Steam doesn't know the game can run in VR. Click OK (Cancel stops the game from starting). Once the game
+  has loaded, the mod switches the headset to full VR.
 - After about 15 minutes in VR the picture goes black in the headset and on the monitor, but menus still work: that
   was a bug in version 0.4.0, fixed in 0.4.1. Update to the latest version (see Install).
 - The mod doesn't seem to load at all (no VR, and `BepInEx\LogOutput.log` is missing or ends with errors): your
