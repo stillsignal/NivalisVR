@@ -7,6 +7,8 @@ What it does:
 
 - Renders the game in proper stereo for your headset, with full head tracking (you can lean and look around).
 - Shows menus, the HUD and dialogue on a large panel fixed in front of you, with a mouse pointer.
+- Has its own small menu (Insert) where you can hide the HUD, recenter, and change the resolution and the size and
+  distance of the panel while you play.
 - While VR is running, your monitor shows what your left eye sees, in a smaller window. It goes back to normal
   afterwards.
 
@@ -18,8 +20,8 @@ doesn't touch DRM or Steam ownership checks.
 - This is an early beta. It has only been tested on one PC (RTX 5090) with SteamVR. Other headsets that use OpenXR
   (Index, Vive, Pimax, Quest through Link, Air Link, Virtual Desktop or Steam Link) should work but haven't been
   tested. Windows Mixed Reality isn't supported.
-- You need a strong GPU. The game is drawn twice per frame, once for each eye. If it stutters, lower the resolution
-  for this game in SteamVR (or your headset's own software), or turn on motion smoothing.
+- If it stutters, lower the resolution in the mod's menu (Insert) or in SteamVR (or your headset's own software), or
+  turn on motion smoothing.
 - To play in VR, start SteamVR (or your headset's software) before the game. If SteamVR isn't running, the game
   starts normally without VR. You can press F11 at any time to switch to VR.
 - When you look towards a low sun, like at sunset, the glow around it can look stronger in one eye. That comes from
@@ -72,11 +74,15 @@ To update to a new version, extract the new zip over the old one and let it repl
 
 | Key | What it does |
 |-----|--------------|
+| Insert | Open the mod's menu: hide the HUD, recenter, resolution, panel distance and size. Esc closes it. |
+| F5  | Hide or show the HUD, for walking around with a clear view. Dialogue, menus and the names above people still show. |
 | F10 | Recenter the view and the menu panel |
 | F11 | Start VR (for example if you launched the game without SteamVR running) |
-| F9  | Side-by-side 3D preview on the monitor (only when VR isn't running) |
 | F8  | Write a diagnostic report to the log (for bug reports) |
 | Shift+F8 | Turn texture logging on or off (for bug reports, see `ResourceStats` below) |
+
+The mod's menu doesn't pause the game. To pause while you change settings, press Esc for the game's own menu first,
+then Insert. Changing the resolution causes a short stutter, and your changes are saved for next time.
 
 ## Settings
 
@@ -86,14 +92,14 @@ game is closed.
 | Section | Setting | Default | What it does |
 |---------|---------|---------|--------------|
 | VR | Enabled | true | Start VR automatically when the game launches (with SteamVR, only if it's already running) |
-| VR | RenderScale | 1.0 | Multiplier on the resolution SteamVR recommends. Changing the resolution in SteamVR works better. |
+| VR | RenderScale | 1.0 | Multiplier on the resolution SteamVR recommends. You can also change it while playing, in the menu (Insert). |
 | VR | SkipMonitorRender | true | Don't draw the game a third time for the monitor; the monitor shows the left eye instead. Only turn this off for troubleshooting: with it off, the picture goes black after about 15 minutes. |
 | UI | PanelDistance | 2.0 | How far away the menu panel is, in metres |
 | UI | PanelWidth | 2.6 | Menu panel width in metres |
 | UI | PanelHeightOffset | -0.1 | Panel height relative to your eyes, in metres |
 | UI | PanelResolutionScale | 1.0 | Menu sharpness compared to the headset's resolution |
+| UI | MenuKey | Insert | Key that opens the mod's menu. Change it if your keyboard has no Insert key (for example to `Home` or `F7`). |
 | Monitor | ShrinkWindowInVr | true | Use a small game window on the monitor while in VR, the same size as the menu panel in the headset (keeps the menus sharp) |
-| Stereo | PreviewEnabled | false | Side-by-side preview on the monitor when VR isn't running |
 | Debug | CaptureKey | false | Lets F6 save the current eye images to `BepInEx\NivalisVR-captures` (for bug reports) |
 | Debug | ResourceStats | false | Every 5 seconds, write to the log how many textures the game creates (for bug reports). Shift+F8 also turns it on or off. |
 

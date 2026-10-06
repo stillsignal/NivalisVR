@@ -59,6 +59,9 @@ internal class UiRedirect
     /// <summary>Raised when the UI texture is (re)created, so the VR side can grab its native pointer.</summary>
     public event Action<RenderTexture> TextureCreated;
 
+    /// <summary>Scan for new overlay canvases on the next Update instead of waiting for the next periodic scan.</summary>
+    public void RequestScan() => _nextScan = 0f;
+
     public void Update(bool vrRunning)
     {
         if (vrRunning)
@@ -193,7 +196,8 @@ internal class UiRedirect
         {
             if (!canvas.isRootCanvas || canvas.renderMode != RenderMode.ScreenSpaceOverlay) continue;
             var name = canvas.name;
-            if (name.StartsWith(OwnPrefix) || name.StartsWith("UniverseLib") || name.StartsWith("UnityExplorer")) continue;
+            // Our own canvases stay where they are, except the mod's menu, which goes on the panel like the game's menus.
+            if ((name.StartsWith(OwnPrefix) && name != ModMenu.CanvasName) || name.StartsWith("UniverseLib") || name.StartsWith("UnityExplorer")) continue;
 
             _redirected.Add(new Redirected
             {

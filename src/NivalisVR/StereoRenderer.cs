@@ -11,7 +11,7 @@ namespace NivalisVR;
 
 /// <summary>
 /// Renders the game's main camera once per eye, either for the headset (OpenXR, milestone 3) or as a
-/// side-by-side preview on the flat screen (milestone 2, used when VR isn't running).
+/// side-by-side preview on the flat screen (milestone 2, used when VR isn't running; F9, only with [Debug] PreviewKey).
 ///
 /// This component lives on our own display camera (depth 100). When that camera is about to cull (after Cinemachine
 /// has positioned MainCamera), we temporarily move MainCamera to each eye's pose, point it at an eye RenderTexture,
@@ -20,8 +20,8 @@ namespace NivalisVR;
 /// </summary>
 public class StereoRenderer : MonoBehaviour
 {
-    internal static ConfigEntry<bool> PreviewEnabled;
-    internal static ConfigEntry<float> Ipd;
+    internal static ConfigEntry<bool> PreviewKeyEnabled;
+    internal static ConfigEntry<float> PreviewIpd;
     internal static ConfigEntry<bool> VrEnabled;
     internal static ConfigEntry<float> VrRenderScale;
     internal static ConfigEntry<bool> VrFlipY;
@@ -43,6 +43,7 @@ public class StereoRenderer : MonoBehaviour
     private CommandBuffer _previewBlit;
     private bool _previewBlitAttached;
     private bool _loggedFirstPreviewFrame;
+    private bool _previewOn;                   // F9, only with [Debug] PreviewKey; not saved
 
     // Headset rendering: the camera renders into _vrEye, which is flipped into _vrSubmit (copied to the swapchain).
     private readonly RenderTexture[] _vrEye = new RenderTexture[2];
@@ -93,6 +94,7 @@ public class StereoRenderer : MonoBehaviour
     internal static ConfigEntry<float> UiPanelWidth;
     internal static ConfigEntry<float> UiPanelHeightOffset;
     private UiRedirect _ui;
+    private ModMenu _menu;
     private RenderTexture _uiSubmit;
     private bool _uiSourceReady;
     private XrPosef _uiPose;
@@ -109,10 +111,6 @@ public class StereoRenderer : MonoBehaviour
     [HideFromIl2Cpp]
     internal static void BindConfig(ConfigFile config)
     {
-        PreviewEnabled = config.Bind("Stereo", "PreviewEnabled", false,
-            "When VR isn't running, show left/right eye views side by side on the flat screen. Toggle in game with F9.");
-        Ipd = config.Bind("Stereo", "Ipd", 0.064f,
-            "Eye distance in metres for the flat side-by-side preview (the headset uses its own IPD).");
         VrEnabled = config.Bind("VR", "Enabled", true,
             "Start VR automatically when the game launches. With SteamVR this only happens if SteamVR is already running; " +
             "otherwise the game starts without VR. F11 starts VR at any time.");
@@ -130,11 +128,18 @@ public class StereoRenderer : MonoBehaviour
             "Width of the menu/HUD panel in metres (height follows the screen's aspect ratio).");
         UiPanelHeightOffset = config.Bind("UI", "PanelHeightOffset", -0.1f,
             "Vertical offset of the panel centre from eye height, in metres (negative = lower).");
+        PreviewKeyEnabled = config.Bind("Debug", "PreviewKey", false,
+            "Lets F9 show the left and right eye views side by side on the monitor when VR isn't running (for testing). " +
+            "Not for playing: while the preview is on, the game's effects leak textures and the picture turns black " +
+            "after ~15 minutes, like the VR bug fixed in 0.4.1.");
+        PreviewIpd = config.Bind("Debug", "PreviewIpd", 0.064f,
+            "Eye distance in metres for the F9 preview only (the headset always uses its own IPD).");
         CaptureKeyEnabled = config.Bind("Debug", "CaptureKey", false,
             "F6 saves the current eye images (and the game's sky/glow helper textures) as PNG files in " +
             "BepInEx/NivalisVR-captures, for bug reports.");
         ResourceStats.BindConfig(config);
         VrWindow.BindConfig(config);
+        ModMenu.BindConfig(config);
     }
 
     [HideFromIl2Cpp]
@@ -199,11 +204,13 @@ public class StereoRenderer : MonoBehaviour
 
         _ui = new UiRedirect();
         _ui.TextureCreated += OnUiTextureCreated;
+        _menu = new ModMenu(_ui.RequestScan);
     }
 
     private void OnDestroy()
     {
         Plugin.Logger.LogInfo("Stereo renderer: shut down");
+        _menu?.Close();
         if (_preCullCallback != null && Camera.onPreCull != null)
             Camera.onPreCull = Camera.onPreCull - _preCullCallback;
         if (_preRenderCallback != null && Camera.onPreRender != null)
@@ -237,6 +244,7 @@ public class StereoRenderer : MonoBehaviour
 
         VrSession.PollEvents();
         HandleHotkeys();
+        _menu.Update();
         ResourceStats.Update(VrSession.IsRunning);
 
         try
@@ -252,7 +260,7 @@ public class StereoRenderer : MonoBehaviour
             VrWindow.Restore();
 
         // The flat preview is only drawn when the headset isn't being driven.
-        SetPreviewBlitAttached(PreviewEnabled.Value && !VrSession.IsRunning && _previewBlit != null);
+        SetPreviewBlitAttached(_previewOn && !VrSession.IsRunning && _previewBlit != null);
     }
 
     [HideFromIl2Cpp]
@@ -261,11 +269,14 @@ public class StereoRenderer : MonoBehaviour
         var keyboard = Keyboard.current;
         if (keyboard == null) return;
 
-        if (keyboard.f9Key.wasPressedThisFrame && !keyboard.shiftKey.isPressed)
+        if (PreviewKeyEnabled.Value && keyboard.f9Key.wasPressedThisFrame && !keyboard.shiftKey.isPressed)
         {
-            PreviewEnabled.Value = !PreviewEnabled.Value;
-            Plugin.Logger.LogInfo($"Side-by-side preview {(PreviewEnabled.Value ? "enabled" : "disabled")}");
+            _previewOn = !_previewOn;
+            Plugin.Logger.LogInfo($"Side-by-side preview {(_previewOn ? "enabled" : "disabled")}");
         }
+
+        if (keyboard.f5Key.wasPressedThisFrame)
+            HudToggle.Toggle();
 
         // Diagnostics (not saved): switch the game camera's own monitor render back on while VR runs, to compare.
         if (keyboard.f9Key.wasPressedThisFrame && keyboard.shiftKey.isPressed)
@@ -277,10 +288,7 @@ public class StereoRenderer : MonoBehaviour
         }
 
         if (keyboard.f10Key.wasPressedThisFrame)
-        {
-            _needsRecenter = true;
-            Plugin.Logger.LogInfo("VR: recenter requested");
-        }
+            RequestRecenter();
 
         if (CaptureKeyEnabled.Value && keyboard.f6Key.wasPressedThisFrame && VrSession.IsRunning)
         {
@@ -306,6 +314,7 @@ public class StereoRenderer : MonoBehaviour
     private void OnFrameStart()
     {
         _frameStartFrame = Time.frameCount;
+        _menu.AfterGameLogic();
         var leftEyeByGame = false;
         try
         {
@@ -483,7 +492,7 @@ public class StereoRenderer : MonoBehaviour
             return;
         }
 
-        if (PreviewEnabled.Value)
+        if (_previewOn)
         {
             var cam = Camera.main;
             if (cam != null) RenderPreviewFrame(cam);
@@ -623,6 +632,29 @@ public class StereoRenderer : MonoBehaviour
             Plugin.Logger.LogInfo($"VR: recentered at head position {_originPosition}, yaw {_lastHeadRotation.eulerAngles.y:F1}");
             PlaceUiPanel();
         }
+    }
+
+    [HideFromIl2Cpp]
+    internal static void RequestRecenter()
+    {
+        if (_instance == null) return;
+        _instance._needsRecenter = true;
+        Plugin.Logger.LogInfo("VR: recenter requested");
+    }
+
+    /// <summary>Moves the UI panel after its distance changed (menu). Its width is read every frame anyway.</summary>
+    [HideFromIl2Cpp]
+    internal static void ReplaceUiPanel()
+    {
+        if (_instance != null && VrSession.IsRunning) _instance.PlaceUiPanel();
+    }
+
+    /// <summary>Saves the new render scale and, while VR runs, switches the eye resolution right away (menu).</summary>
+    [HideFromIl2Cpp]
+    internal static void SetRenderScale(float renderScale)
+    {
+        VrRenderScale.Value = renderScale;
+        if (VrSession.IsInitialized) VrSession.SetRenderScale(renderScale);
     }
 
     /// <summary>
@@ -771,12 +803,24 @@ public class StereoRenderer : MonoBehaviour
         _companions.Clear();
     }
 
+    /// <summary>Creates the eye textures, or recreates them after a resolution change (menu), and hands them to VrSession.</summary>
     [HideFromIl2Cpp]
     private void EnsureVrTargets()
     {
-        if (_vrSubmit[0] != null && _vrSubmit[1] != null && (!VrFlipY.Value || (_vrEye[0] != null && _vrEye[1] != null)))
+        int width = VrSession.EyeWidth, height = VrSession.EyeHeight;
+        var exist = _vrSubmit[0] != null && _vrSubmit[1] != null && (!VrFlipY.Value || (_vrEye[0] != null && _vrEye[1] != null));
+        if (exist && _vrSubmit[0].width == width && _vrSubmit[0].height == height)
+        {
+            if (VrSession.NeedsSourceTextures)
+                VrSession.SetSourceTextures(_vrSubmit[0].GetNativeTexturePtr(), _vrSubmit[1].GetNativeTexturePtr());
             return;
+        }
 
+        if (exist)
+        {
+            Plugin.Logger.LogInfo($"VR: eye textures resized to {width}x{height}");
+            ReleaseGameEffectTextures();
+        }
         for (var eye = 0; eye < 2; eye++)
         {
             DestroyTarget(_vrEye[eye]);
@@ -787,6 +831,39 @@ public class StereoRenderer : MonoBehaviour
         }
 
         VrSession.SetSourceTextures(_vrSubmit[0].GetNativeTexturePtr(), _vrSubmit[1].GetNativeTexturePtr());
+    }
+
+    /// <summary>
+    /// The game's Hx light shafts build new textures whenever MainCamera's size changes and never free the old ones
+    /// (the cause of the 0.4.0 black screen), so every resolution change from the menu leaked ~5 textures at the
+    /// old size. Before the eye size changes, Hx releases its current ones; it builds new ones at the next render.
+    /// </summary>
+    [HideFromIl2Cpp]
+    private static void ReleaseGameEffectTextures()
+    {
+        try
+        {
+            var cam = Camera.main;
+            if (cam != null)
+                Plugin.Logger.LogInfo($"VR: released the light-shaft textures of {ReleaseHxTextures(cam)} camera(s) before the resize");
+        }
+        catch (Exception e)
+        {
+            Plugin.Logger.LogWarning($"VR: couldn't release the light-shaft textures before the resize: {e.Message}");
+        }
+    }
+
+    [HideFromIl2Cpp]
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static int ReleaseHxTextures(Camera cam)
+    {
+        var count = 0;
+        foreach (var hx in cam.GetComponentsInChildren<HxVolumetricCamera>())
+        {
+            hx.ReleaseTempTextures();
+            count++;
+        }
+        return count;
     }
 
     // OpenXR is right-handed (+Y up, -Z forward); Unity is left-handed (+Z forward). Mirror the Z axis.
@@ -965,13 +1042,13 @@ public class StereoRenderer : MonoBehaviour
             if (!_loggedFirstPreviewFrame)
             {
                 _loggedFirstPreviewFrame = true;
-                Plugin.Logger.LogInfo($"Side-by-side preview: first frame rendered from '{cam.name}', eye {_previewLeft.width}x{_previewLeft.height}, IPD {Ipd.Value}");
+                Plugin.Logger.LogInfo($"Side-by-side preview: first frame rendered from '{cam.name}', eye {_previewLeft.width}x{_previewLeft.height}, IPD {PreviewIpd.Value}");
             }
         }
         catch (Exception e)
         {
             Plugin.Logger.LogError($"Side-by-side preview failed, disabling: {e}");
-            PreviewEnabled.Value = false;
+            _previewOn = false;
         }
     }
 
@@ -982,7 +1059,7 @@ public class StereoRenderer : MonoBehaviour
         var originalPos = t.position;
         var originalTarget = cam.targetTexture;
 
-        t.position = originalPos + t.right * (side * Ipd.Value);
+        t.position = originalPos + t.right * (side * PreviewIpd.Value);
         cam.targetTexture = target;
         cam.aspect = (float)target.width / target.height;
         _manualRender = true;

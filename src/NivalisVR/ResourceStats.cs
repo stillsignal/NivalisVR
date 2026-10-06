@@ -129,6 +129,25 @@ internal static class ResourceStats
         _splitArmed = false;
     }
 
+    /// <summary>Rough video memory of a render texture: colour (+ depth/stencil), MSAA, mips. Good enough to spot growth.</summary>
+    private static long EstimateBytes(RenderTexture rt)
+    {
+        var colour = rt.format switch
+        {
+            RenderTextureFormat.R8 => 1,
+            RenderTextureFormat.RHalf or RenderTextureFormat.RG16 or RenderTextureFormat.R16 or RenderTextureFormat.RGB565
+                or RenderTextureFormat.ARGB4444 or RenderTextureFormat.ARGB1555 => 2,
+            RenderTextureFormat.ARGBHalf or RenderTextureFormat.DefaultHDR or RenderTextureFormat.ARGB64 or RenderTextureFormat.RGFloat
+                or RenderTextureFormat.RGInt or RenderTextureFormat.RGBAUShort => 8,
+            RenderTextureFormat.ARGBFloat or RenderTextureFormat.ARGBInt => 16,
+            _ => 4,
+        };
+        var depth = rt.depth > 0 ? 4 : 0;
+        var pixels = (long)rt.width * rt.height * Math.Max(1, rt.volumeDepth) * Math.Max(1, rt.antiAliasing);
+        var bytes = pixels * (colour + depth);
+        return rt.useMipMap ? bytes * 4 / 3 : bytes;
+    }
+
     private static void Report(bool vrRunning)
     {
         var frame = Time.frameCount;
@@ -139,11 +158,19 @@ internal static class ResourceStats
         var maxTempSerial = 0;
         var rtIds = new HashSet<int>();
         var newRtGroups = new Dictionary<string, int>();
+        var createdRts = 0;
+        var createdBytes = 0L;
         foreach (var rt in renderTextures)
         {
             if (rt == null) continue;
             var id = rt.GetInstanceID();
             rtIds.Add(id);
+            // A released render texture keeps its object but no video memory, so count both.
+            if (rt.IsCreated())
+            {
+                createdRts++;
+                createdBytes += EstimateBytes(rt);
+            }
             var name = rt.name ?? "";
             var match = TempBufferName.Match(name);
             if (match.Success && int.TryParse(match.Groups[1].Value, out var serial) && serial > maxTempSerial)
@@ -178,7 +205,7 @@ internal static class ResourceStats
             var sb = new StringBuilder();
             sb.Append($"Resource stats ({(vrRunning ? "VR running" : "flat")}, {seconds:F1} s, {frames} frames, {frames / seconds:F0} fps): ");
             sb.Append($"temp RTs created +{tempCreated} ({(float)tempCreated / frames:F1}/frame); ");
-            sb.Append($"render textures {rtIds.Count} (+{newRtGroups.Values.Sum()} new); ");
+            sb.Append($"render textures {rtIds.Count} (+{newRtGroups.Values.Sum()} new; {createdRts} in video memory, ~{createdBytes / (1024 * 1024)} MB); ");
             sb.Append($"Texture2D {texIds.Count} (+{newTexGroups.Values.Sum()} new); ");
             sb.Append($"object IDs used ~{objectsCreated} ({(float)objectsCreated / frames:F1}/frame); ");
             sb.Append($"game camera's own renders {GameCameraRenders} ({(float)GameCameraRenders / frames:F2}/frame); ");

@@ -39,14 +39,30 @@ internal static unsafe class VrSession
     public static bool IsRunning => _sessionRunning;  // xrBeginSession done and not stopping
     public static int EyeWidth { get; private set; }
     public static int EyeHeight { get; private set; }
+    public static float RenderScale { get; private set; }
     public static XrSessionState State { get; private set; }
 
+    /// <summary>True when the eye swapchains are new (start or resolution change) and need SetSourceTextures.</summary>
+    public static bool NeedsSourceTextures => IsInitialized && (_pendingEyes != null || _eyes == null);
+
     private static ulong _instance, _system, _session, _localSpace;
-    private static readonly ulong[] Swapchains = new ulong[2];
-    private static readonly IntPtr[][] SwapchainImages = new IntPtr[2][];
-    private static readonly IntPtr[] SourceTextures = new IntPtr[2];
     private static IntPtr _device, _context;
     private static long _swapchainFormat;
+    private static uint _recommendedWidth, _recommendedHeight, _maxWidth, _maxHeight;
+
+    // Eye swapchains and the textures copied into them, swapped as one reference so a resolution change can't
+    // tear: the render thread reads _eyes once per frame. New swapchains wait in _pendingEyes (main thread only)
+    // until the renderer hands in textures of the new size.
+    private sealed class EyeTargets
+    {
+        public ulong[] Swapchains;
+        public IntPtr[][] Images;
+        public IntPtr[] Sources;
+        public int Width, Height;
+    }
+
+    private static volatile EyeTargets _eyes;
+    private static EyeTargets _pendingEyes;
 
     // UI panel: everything the render thread needs, swapped as one reference so a resize can't tear it.
     private sealed class UiTarget
@@ -101,10 +117,11 @@ internal static unsafe class VrSession
             CreateLocalSpace();
             ChooseSwapchainFormat();
 
-            EyeWidth = Math.Clamp((int)Math.Round(view.recommendedImageRectWidth * renderScale), 64, (int)view.maxImageRectWidth);
-            EyeHeight = Math.Clamp((int)Math.Round(view.recommendedImageRectHeight * renderScale), 64, (int)view.maxImageRectHeight);
-            for (var eye = 0; eye < 2; eye++)
-                CreateSwapchain(eye);
+            _recommendedWidth = view.recommendedImageRectWidth;
+            _recommendedHeight = view.recommendedImageRectHeight;
+            _maxWidth = view.maxImageRectWidth;
+            _maxHeight = view.maxImageRectHeight;
+            CreateEyeSwapchains(renderScale);
 
             _renderEventFunc = (IntPtr)(delegate* unmanaged[Stdcall]<int, void>)&OnRenderEvent;
             IsInitialized = true;
@@ -269,9 +286,61 @@ internal static unsafe class VrSession
         Plugin.Logger.LogInfo($"OpenXR: using swapchain format {_swapchainFormat}");
     }
 
-    private static void CreateSwapchain(int eye)
+    private static (int Width, int Height) EyeSizeFor(float renderScale) =>
+        (Math.Clamp((int)Math.Round(_recommendedWidth * renderScale), 64, (int)_maxWidth),
+         Math.Clamp((int)Math.Round(_recommendedHeight * renderScale), 64, (int)_maxHeight));
+
+    /// <summary>Creates both eye swapchains for this scale as the pending set (main thread).</summary>
+    private static void CreateEyeSwapchains(float renderScale)
     {
-        Swapchains[eye] = CreateColorSwapchain(EyeWidth, EyeHeight, $"eye {eye}", out SwapchainImages[eye]);
+        var (width, height) = EyeSizeFor(renderScale);
+        var targets = new EyeTargets { Swapchains = new ulong[2], Images = new IntPtr[2][], Width = width, Height = height };
+        try
+        {
+            for (var eye = 0; eye < 2; eye++)
+                targets.Swapchains[eye] = CreateColorSwapchain(width, height, $"eye {eye}", out targets.Images[eye]);
+        }
+        catch
+        {
+            foreach (var swapchain in targets.Swapchains)
+                if (swapchain != 0) Xr.DestroySwapchain(swapchain);
+            throw;
+        }
+
+        // A pending set the render thread never saw (two changes within one frame) can go right away.
+        if (_pendingEyes != null)
+            foreach (var swapchain in _pendingEyes.Swapchains) Xr.DestroySwapchain(swapchain);
+        _pendingEyes = targets;
+        EyeWidth = width;
+        EyeHeight = height;
+        RenderScale = renderScale;
+    }
+
+    /// <summary>
+    /// Changes the eye resolution while VR runs (main thread). The new swapchains take over once the renderer hands
+    /// in textures of the new size (SetSourceTextures); the old ones are then destroyed on the render thread.
+    /// </summary>
+    public static bool SetRenderScale(float renderScale)
+    {
+        if (!IsInitialized) return false;
+        var (width, height) = EyeSizeFor(renderScale);
+        if (width == EyeWidth && height == EyeHeight)
+        {
+            RenderScale = renderScale;
+            return true;
+        }
+
+        try
+        {
+            CreateEyeSwapchains(renderScale);
+            Plugin.Logger.LogInfo($"OpenXR: eye resolution changed to {width}x{height} (render scale {renderScale:F2})");
+            return true;
+        }
+        catch (Exception e)
+        {
+            Plugin.Logger.LogError($"OpenXR: changing the eye resolution failed, keeping {EyeWidth}x{EyeHeight}: {e.Message}");
+            return false;
+        }
     }
 
     private static ulong CreateColorSwapchain(int width, int height, string label, out IntPtr[] textures)
@@ -335,11 +404,28 @@ internal static unsafe class VrSession
         }
     }
 
-    /// <summary>Native ID3D11Texture2D pointers of the RenderTextures to copy into the swapchains (must match EyeWidth x EyeHeight).</summary>
+    /// <summary>
+    /// Native ID3D11Texture2D pointers of the RenderTextures to copy into the swapchains (must match EyeWidth x EyeHeight).
+    /// Also switches over to swapchains created by a resolution change. Getting a native pointer waits for Unity's render
+    /// thread, so every frame queued before this call has already been submitted with the previous set.
+    /// </summary>
     public static void SetSourceTextures(IntPtr left, IntPtr right)
     {
-        SourceTextures[0] = left;
-        SourceTextures[1] = right;
+        var current = _eyes;
+        var swapchains = _pendingEyes ?? current;
+        if (swapchains == null) return;
+
+        _eyes = new EyeTargets
+        {
+            Swapchains = swapchains.Swapchains,
+            Images = swapchains.Images,
+            Sources = new[] { left, right },
+            Width = swapchains.Width,
+            Height = swapchains.Height,
+        };
+        if (_pendingEyes != null && current != null)
+            foreach (var swapchain in current.Swapchains) RetiredSwapchains.Enqueue(swapchain);
+        _pendingEyes = null;
         Plugin.Logger.LogInfo($"OpenXR: source eye textures left = {D3D11.GetDesc(left)}, right = {D3D11.GetDesc(right)}");
     }
 
@@ -350,6 +436,8 @@ internal static unsafe class VrSession
             Xr.DestroyInstance(_instance); // destroys the session, spaces and swapchains too
         _instance = _system = _session = _localSpace = 0;
         _uiTarget = null;
+        _eyes = null;
+        _pendingEyes = null;
         if (_context != IntPtr.Zero) D3D11.Release(_context);
         if (_device != IntPtr.Zero) D3D11.Release(_device);
         _context = _device = IntPtr.Zero;
@@ -536,6 +624,7 @@ internal static unsafe class VrSession
         while (RetiredSwapchains.TryDequeue(out var retired))
             Xr.DestroySwapchain(retired);
 
+        var eyes = _eyes;
         var ui = _uiTarget;
         var quad = new XrCompositionLayerQuad
         {
@@ -552,12 +641,12 @@ internal static unsafe class VrSession
 
         var layers = stackalloc void*[2];
         var layerCount = 0u;
-        if (slot.ShouldRender && SourceTextures[0] != IntPtr.Zero && SourceTextures[1] != IntPtr.Zero)
+        if (slot.ShouldRender && eyes != null && eyes.Sources[0] != IntPtr.Zero && eyes.Sources[1] != IntPtr.Zero)
         {
             var eyesCopied = true;
             for (var eye = 0; eye < 2 && eyesCopied; eye++)
             {
-                eyesCopied = CopyIntoSwapchain(Swapchains[eye], SwapchainImages[eye], SourceTextures[eye], eye == 0 ? "left eye" : "right eye");
+                eyesCopied = CopyIntoSwapchain(eyes.Swapchains[eye], eyes.Images[eye], eyes.Sources[eye], eye == 0 ? "left eye" : "right eye");
                 var view = eye == 0 ? slot.Left : slot.Right;
                 views[eye] = new XrCompositionLayerProjectionView
                 {
@@ -566,9 +655,9 @@ internal static unsafe class VrSession
                     fov = view.fov,
                     subImage = new XrSwapchainSubImage
                     {
-                        swapchain = Swapchains[eye],
-                        extentWidth = EyeWidth,
-                        extentHeight = EyeHeight,
+                        swapchain = eyes.Swapchains[eye],
+                        extentWidth = eyes.Width,
+                        extentHeight = eyes.Height,
                     },
                 };
             }

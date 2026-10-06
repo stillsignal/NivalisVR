@@ -34,6 +34,9 @@
     <Reference Include="$(InteropDir)UnityEngine.UIModule.dll" Private="false" />
     <Reference Include="$(InteropDir)UnityEngine.ImageConversionModule.dll" Private="false" />
     <Reference Include="$(InteropDir)UnityEngine.UI.dll" Private="false" />
+    <Reference Include="$(InteropDir)UnityEngine.TextRenderingModule.dll" Private="false" />
+    <Reference Include="$(InteropDir)Assembly-CSharp.dll" Private="false" />
+    <Reference Include="$(InteropDir)Assembly-CSharp-firstpass.dll" Private="false" />
   </ItemGroup>
 
   <!-- Install: copy only our plugin DLL into game-copy/BepInEx/plugins/NivalisVR
