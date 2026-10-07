@@ -92,6 +92,8 @@ internal class UiRedirect
             _camera.enabled = false;
             _monitorCanvas.gameObject.SetActive(false);
             _cursorCanvas.gameObject.SetActive(false);
+            // Freed, so the next VR start creates it again and the headset gets its UI panel back (TextureCreated).
+            ReleaseTexture();
             Plugin.Logger.LogInfo("UI redirect: inactive, canvases restored");
         }
     }
@@ -161,12 +163,7 @@ internal class UiRedirect
     {
         if (_texture != null && _texture.width == Screen.width && _texture.height == Screen.height) return;
 
-        if (_texture != null)
-        {
-            _camera.targetTexture = null;
-            _texture.Release();
-            Object.Destroy(_texture);
-        }
+        ReleaseTexture();
 
         // Depth/stencil buffer is needed for UI Masks (stencil-based).
         _texture = new RenderTexture(Screen.width, Screen.height, 24, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
@@ -179,6 +176,16 @@ internal class UiRedirect
         _monitorImage.texture = _texture;
         Plugin.Logger.LogInfo($"UI redirect: UI texture {_texture.width}x{_texture.height}");
         TextureCreated?.Invoke(_texture);
+    }
+
+    private void ReleaseTexture()
+    {
+        if (_texture == null) return;
+        _camera.targetTexture = null;
+        _monitorImage.texture = null;
+        _texture.Release();
+        Object.Destroy(_texture);
+        _texture = null;
     }
 
     /// <summary>Canvas plane spans world x 0..width, y 0..height at z = CanvasZ, exactly like an overlay canvas.</summary>

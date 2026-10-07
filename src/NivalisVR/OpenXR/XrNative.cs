@@ -393,6 +393,7 @@ internal static unsafe class Xr
     public static delegate* unmanaged[Stdcall]<ulong, XrSessionCreateInfo*, ulong*, int> CreateSession;
     public static delegate* unmanaged[Stdcall]<ulong, XrSessionBeginInfo*, int> BeginSession;
     public static delegate* unmanaged[Stdcall]<ulong, int> EndSession;
+    public static delegate* unmanaged[Stdcall]<ulong, int> RequestExitSession;
     public static delegate* unmanaged[Stdcall]<ulong, XrReferenceSpaceCreateInfo*, ulong*, int> CreateReferenceSpace;
     public static delegate* unmanaged[Stdcall]<ulong, uint, uint*, long*, int> EnumerateSwapchainFormats;
     public static delegate* unmanaged[Stdcall]<ulong, XrSwapchainCreateInfo*, ulong*, int> CreateSwapchain;
@@ -430,6 +431,7 @@ internal static unsafe class Xr
         CreateSession = (delegate* unmanaged[Stdcall]<ulong, XrSessionCreateInfo*, ulong*, int>)Proc(instance, "xrCreateSession");
         BeginSession = (delegate* unmanaged[Stdcall]<ulong, XrSessionBeginInfo*, int>)Proc(instance, "xrBeginSession");
         EndSession = (delegate* unmanaged[Stdcall]<ulong, int>)Proc(instance, "xrEndSession");
+        RequestExitSession = (delegate* unmanaged[Stdcall]<ulong, int>)Proc(instance, "xrRequestExitSession");
         CreateReferenceSpace = (delegate* unmanaged[Stdcall]<ulong, XrReferenceSpaceCreateInfo*, ulong*, int>)Proc(instance, "xrCreateReferenceSpace");
         EnumerateSwapchainFormats = (delegate* unmanaged[Stdcall]<ulong, uint, uint*, long*, int>)Proc(instance, "xrEnumerateSwapchainFormats");
         CreateSwapchain = (delegate* unmanaged[Stdcall]<ulong, XrSwapchainCreateInfo*, ulong*, int>)Proc(instance, "xrCreateSwapchain");

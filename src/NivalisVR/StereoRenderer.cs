@@ -49,6 +49,10 @@ public class StereoRenderer : MonoBehaviour
     private readonly RenderTexture[] _vrEye = new RenderTexture[2];
     private readonly RenderTexture[] _vrSubmit = new RenderTexture[2];
     private bool _vrInitAttempted;
+    // Switching between VR and flat (Shift+F11 / F11): see Update.
+    private bool _wasVrRunning;
+    private bool _releaseEffectsOnResize;
+    private int _lastScreenWidth, _lastScreenHeight;
     private bool _loggedFirstVrFrame;
 
     // While VR runs, MainCamera's own render for the monitor is replaced by the eye renders. An empty camera of ours
@@ -244,7 +248,7 @@ public class StereoRenderer : MonoBehaviour
 
         VrSession.PollEvents();
         HandleHotkeys();
-        _menu.Update();
+        _menu.Update(VrSession.IsRunning);
         ResourceStats.Update(VrSession.IsRunning);
 
         try
@@ -257,7 +261,12 @@ public class StereoRenderer : MonoBehaviour
         }
 
         if (!VrSession.IsRunning)
+        {
             VrWindow.Restore();
+            HudToggle.RestoreForFlat();
+        }
+
+        HandleVrSwitch();
 
         // The flat preview is only drawn when the headset isn't being driven.
         SetPreviewBlitAttached(_previewOn && !VrSession.IsRunning && _previewBlit != null);
@@ -275,7 +284,8 @@ public class StereoRenderer : MonoBehaviour
             Plugin.Logger.LogInfo($"Side-by-side preview {(_previewOn ? "enabled" : "disabled")}");
         }
 
-        if (keyboard.f5Key.wasPressedThisFrame)
+        // VR only, like the menu: without VR the game should look and play like the unmodded game.
+        if (keyboard.f5Key.wasPressedThisFrame && VrSession.IsRunning)
             HudToggle.Toggle();
 
         // Diagnostics (not saved): switch the game camera's own monitor render back on while VR runs, to compare.
@@ -299,11 +309,65 @@ public class StereoRenderer : MonoBehaviour
         if (keyboard.f8Key.wasPressedThisFrame && keyboard.shiftKey.isPressed)
             ResourceStats.Toggle();
 
-        if (keyboard.f11Key.wasPressedThisFrame && !VrSession.IsInitialized)
+        if (keyboard.f11Key.wasPressedThisFrame && !keyboard.shiftKey.isPressed && !VrSession.IsInitialized)
         {
             Plugin.Logger.LogInfo("VR: starting VR (F11)");
             VrSession.Initialize(VrRenderScale.Value);
         }
+
+        if (keyboard.f11Key.wasPressedThisFrame && keyboard.shiftKey.isPressed && VrSession.IsInitialized)
+        {
+            Plugin.Logger.LogInfo("VR: switching VR off, the game keeps running (Shift+F11)");
+            VrSession.RequestStop();
+        }
+    }
+
+    /// <summary>
+    /// Clean switches between VR and flat. MainCamera changes size when VR starts or stops (eye size vs window), and
+    /// the game's Hx light shafts would leave a set of textures at the old size behind every time (see
+    /// ReleaseGameEffectTextures). The window size also changes a few frames after VR stops (VrWindow.Restore), so
+    /// that resize gets the same treatment. Once the OpenXR session is gone, our eye textures are freed too.
+    /// </summary>
+    [HideFromIl2Cpp]
+    private void HandleVrSwitch()
+    {
+        var running = VrSession.IsRunning;
+        if (running != _wasVrRunning)
+        {
+            _wasVrRunning = running;
+            ReleaseGameEffectTextures();
+            _releaseEffectsOnResize = !running;
+        }
+        else if (!running && _releaseEffectsOnResize && (Screen.width != _lastScreenWidth || Screen.height != _lastScreenHeight))
+        {
+            _releaseEffectsOnResize = false;
+            ReleaseGameEffectTextures();
+        }
+        _lastScreenWidth = Screen.width;
+        _lastScreenHeight = Screen.height;
+
+        if (!VrSession.IsInitialized && _vrSubmit[0] != null)
+            ReleaseVrTargets();
+    }
+
+    /// <summary>Frees the eye and UI panel textures after VR stopped (the render thread no longer uses them).</summary>
+    [HideFromIl2Cpp]
+    private void ReleaseVrTargets()
+    {
+        RestoreLeftEyeCamera();
+        ReleaseMonitorBlit();
+        for (var eye = 0; eye < 2; eye++)
+        {
+            DestroyTarget(_vrEye[eye]);
+            DestroyTarget(_vrSubmit[eye]);
+            _vrEye[eye] = _vrSubmit[eye] = null;
+        }
+        DestroyTarget(_uiSubmit);
+        _uiSubmit = null;
+        _uiSourceReady = false;
+        _needsRecenter = true; // F11 starts with the view centred again
+        _loggedFirstVrFrame = false;
+        Plugin.Logger.LogInfo("VR: eye textures released");
     }
 
     /// <summary>

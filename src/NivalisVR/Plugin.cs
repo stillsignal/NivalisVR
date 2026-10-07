@@ -14,7 +14,7 @@ public class Plugin : BasePlugin
 {
     public const string Guid = "com.nivalisvr.plugin";
     public const string Name = "Nivalis VR";
-    public const string Version = "0.4.2";
+    public const string Version = "0.4.3";
 
     internal static ManualLogSource Logger;
     private static ConfigEntry<bool> _autoDump;

@@ -25,6 +25,9 @@ namespace NivalisVR;
 /// clicks, scroll, navigate) is paused, so moving the mouse doesn't turn the camera and Esc doesn't open the game's
 /// pause menu.
 ///
+/// Only while VR runs (like UEVR, which only exists while it's injected): in flat, Insert does nothing, and the menu
+/// closes if VR stops, so the game never looks altered outside VR.
+///
 /// Plain class (not an injected MonoBehaviour); StereoRenderer drives it.
 /// </summary>
 internal class ModMenu
@@ -93,15 +96,25 @@ internal class ModMenu
     internal static void BindConfig(ConfigFile config)
     {
         MenuKey = config.Bind("UI", "MenuKey", Key.Insert,
-            "Key that opens the mod's menu (hide HUD, recenter, resolution, menu panel distance and size). " +
+            "Key that opens the mod's menu while VR is running (hide HUD, recenter, resolution, menu panel distance and size). " +
             "Any key name from Unity's Input System, e.g. Insert, Home, F7.");
     }
 
-    public void Update()
+    public void Update(bool vrRunning)
     {
         if (_failed) return;
         try
         {
+            if (!vrRunning)
+            {
+                if (_open)
+                {
+                    Plugin.Logger.LogInfo("Menu: VR stopped, closing the menu");
+                    SetOpen(false);
+                }
+                return;
+            }
+
             ApplyPendingScale(false);
 
             var keyboard = Keyboard.current;

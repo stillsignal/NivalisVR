@@ -12,7 +12,8 @@ namespace NivalisVR.OpenXR;
 ///
 /// Threading model:
 ///  - Main thread: Initialize, PollEvents, WaitAndLocate (xrWaitFrame + xrLocateViews), eye rendering.
-///  - Render thread (via GL.IssuePluginEvent): xrBeginFrame, swapchain acquire/copy/release, xrEndFrame, xrEndSession.
+///  - Render thread (via GL.IssuePluginEvent): xrBeginFrame, swapchain acquire/copy/release, xrEndFrame, xrEndSession,
+///    and xrDestroyInstance when VR is switched off (RequestStop), so it runs after every frame already queued.
 ///    Everything that touches the D3D11 immediate context runs there, in order with Unity's own rendering commands.
 ///    OpenXR explicitly allows xrBeginFrame/xrEndFrame on a different thread from xrWaitFrame.
 /// The render-thread callback must never touch IL2CPP/Unity objects; it only uses the plain fields below.
@@ -34,6 +35,7 @@ internal static unsafe class VrSession
     private const int SlotCount = 4;
     private const int EventSubmitBase = 1;           // 1..SlotCount: submit that slot
     private const int EventEndSession = 100;
+    private const int EventDestroy = 101;
 
     public static bool IsInitialized { get; private set; }
     public static bool IsRunning => _sessionRunning;  // xrBeginSession done and not stopping
@@ -78,6 +80,13 @@ internal static unsafe class VrSession
     private static readonly ConcurrentQueue<ulong> RetiredSwapchains = new();
 
     private static volatile bool _sessionRunning;
+
+    // Switching VR off (Shift+F11): exit requested -> STOPPING (xrEndSession) -> IDLE -> destroy on the render thread
+    // -> FinishShutdown on the main thread. The main thread makes no OpenXR calls while _shuttingDown.
+    private static volatile bool _exitRequested;
+    private static volatile bool _shuttingDown;
+    private static volatile bool _shutdownDone;
+    private static volatile bool _rtSessionEnded; // render thread: no frames may be submitted (ended or destroyed)
     private static readonly FrameSlot[] Slots = new FrameSlot[SlotCount];
     private static int _nextSlot;
     private static IntPtr _renderEventFunc;
@@ -97,6 +106,7 @@ internal static unsafe class VrSession
     {
         if (IsInitialized) return;
         var log = Plugin.Logger;
+        _rtSessionEnded = false; // nothing is queued on the render thread before the session begins
 
         try
         {
@@ -322,7 +332,7 @@ internal static unsafe class VrSession
     /// </summary>
     public static bool SetRenderScale(float renderScale)
     {
-        if (!IsInitialized) return false;
+        if (!IsInitialized || _shuttingDown) return false;
         var (width, height) = EyeSizeFor(renderScale);
         if (width == EyeWidth && height == EyeHeight)
         {
@@ -379,7 +389,7 @@ internal static unsafe class VrSession
     /// </summary>
     public static bool SetUiSource(IntPtr texture, int width, int height)
     {
-        if (!IsInitialized) return false;
+        if (!IsInitialized || _shuttingDown) return false;
 
         try
         {
@@ -411,6 +421,7 @@ internal static unsafe class VrSession
     /// </summary>
     public static void SetSourceTextures(IntPtr left, IntPtr right)
     {
+        if (_shuttingDown) return;
         var current = _eyes;
         var swapchains = _pendingEyes ?? current;
         if (swapchains == null) return;
@@ -448,6 +459,12 @@ internal static unsafe class VrSession
 
     public static void PollEvents()
     {
+        if (_shuttingDown)
+        {
+            DrainRenderThreadMessages();
+            if (_shutdownDone) FinishShutdown();
+            return;
+        }
         if (_instance == 0) return;
 
         while (true)
@@ -485,6 +502,7 @@ internal static unsafe class VrSession
         switch (state)
         {
             case XrSessionState.Ready:
+                _rtSessionEnded = false; // the previous session's xrEndSession has run by now
                 var info = new XrSessionBeginInfo { type = XrStructureType.SessionBeginInfo, primaryViewConfigurationType = XrConst.ViewConfigurationPrimaryStereo };
                 var result = Xr.BeginSession(_session, &info);
                 if (result < 0)
@@ -500,11 +518,81 @@ internal static unsafe class VrSession
                 StopFrames();
                 break;
 
+            case XrSessionState.Idle:
+                // After our own exit request the session is ended now; without one the runtime may start it again.
+                if (_exitRequested) BeginShutdown();
+                break;
+
             case XrSessionState.LossPending:
             case XrSessionState.Exiting:
-                _sessionRunning = false;
+                BeginShutdown();
                 break;
         }
+    }
+
+    /// <summary>
+    /// Switches VR off while the game keeps running (main thread). Asks the runtime to end the session; the rest
+    /// follows from the state changes. F11 (Initialize) starts VR again once IsInitialized is false.
+    /// </summary>
+    public static void RequestStop()
+    {
+        if (!IsInitialized || _shuttingDown || _exitRequested) return;
+
+        if (_sessionRunning)
+        {
+            var result = Xr.RequestExitSession(_session);
+            if (result >= 0)
+            {
+                _exitRequested = true;
+                Plugin.Logger.LogInfo("OpenXR: leaving VR (exit requested)");
+                return;
+            }
+            Plugin.Logger.LogWarning($"OpenXR: xrRequestExitSession failed ({Xr.Describe(_instance, result)}); shutting down directly");
+        }
+        BeginShutdown();
+    }
+
+    /// <summary>Ends the session (if running) and destroys the instance on the render thread, after queued frames.</summary>
+    private static void BeginShutdown()
+    {
+        if (_shuttingDown) return;
+        StopFrames(); // queues xrEndSession if the session is still running
+        _sessionRunning = false;
+        _shuttingDown = true;
+        _shutdownDone = false;
+        GL.IssuePluginEvent(_renderEventFunc, EventDestroy);
+        Plugin.Logger.LogInfo("OpenXR: shutting down the VR session");
+    }
+
+    // Render thread.
+    private static void DestroyOnRenderThread()
+    {
+        _rtSessionEnded = true;
+        while (RetiredSwapchains.TryDequeue(out _)) { } // destroyed together with the instance
+        if (_instance != 0 && Xr.DestroyInstance != null)
+        {
+            var result = Xr.DestroyInstance(_instance); // destroys the session, spaces and swapchains too
+            RenderThreadMessages.Enqueue($"xrDestroyInstance: {(result >= 0 ? "ok" : result.ToString())}");
+        }
+        _shutdownDone = true;
+    }
+
+    /// <summary>Main thread, after the render thread destroyed the instance: back to the not-initialized state.</summary>
+    private static void FinishShutdown()
+    {
+        _instance = _system = _session = _localSpace = 0;
+        _uiTarget = null;
+        _eyes = null;
+        _pendingEyes = null;
+        if (_context != IntPtr.Zero) D3D11.Release(_context);
+        if (_device != IntPtr.Zero) D3D11.Release(_device);
+        _context = _device = IntPtr.Zero;
+        State = XrSessionState.Unknown;
+        _exitRequested = false;
+        _shutdownDone = false;
+        _shuttingDown = false;
+        IsInitialized = false;
+        Plugin.Logger.LogInfo("OpenXR: VR stopped; the game continues without VR (F11 starts VR again)");
     }
 
     private static void StopFrames()
@@ -589,13 +677,21 @@ internal static unsafe class VrSession
         {
             if (eventId == EventEndSession)
             {
+                if (_rtSessionEnded) return;
+                _rtSessionEnded = true; // a frame located before the stop may still be queued; it's skipped
                 var result = Xr.EndSession(_session);
                 RenderThreadMessages.Enqueue($"xrEndSession: {Xr.Describe(_instance, result)}");
                 return;
             }
 
+            if (eventId == EventDestroy)
+            {
+                DestroyOnRenderThread();
+                return;
+            }
+
             var slot = eventId - EventSubmitBase;
-            if (slot >= 0 && slot < SlotCount)
+            if (slot >= 0 && slot < SlotCount && !_rtSessionEnded)
                 SubmitFrame(ref Slots[slot]);
         }
         catch (Exception e)

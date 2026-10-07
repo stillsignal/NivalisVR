@@ -23,7 +23,7 @@ doesn't touch DRM or Steam ownership checks.
 - If it stutters, lower the resolution in the mod's menu (Insert) or in SteamVR (or your headset's own software), or
   turn on motion smoothing.
 - To play in VR, start SteamVR (or your headset's software) before the game. If SteamVR isn't running, the game
-  starts normally without VR. You can press F11 at any time to switch to VR.
+  starts normally without VR. You can press F11 at any time to switch to VR, and Shift+F11 to switch it off again.
 - When you look towards a low sun, like at sunset, the glow around it can look stronger in one eye. That comes from
   the game's volumetric lighting, which doesn't fully support VR.
 - Game updates may break the mod.
@@ -78,8 +78,11 @@ To update to a new version, extract the new zip over the old one and let it repl
 | F5  | Hide or show the HUD, for walking around with a clear view. Dialogue, menus and the names above people still show. |
 | F10 | Recenter the view and the menu panel |
 | F11 | Start VR (for example if you launched the game without SteamVR running) |
+| Shift+F11 | Switch VR off and keep playing on the monitor. F11 starts VR again. |
 | F8  | Write a diagnostic report to the log (for bug reports) |
 | Shift+F8 | Turn texture logging on or off (for bug reports, see `ResourceStats` below) |
+
+Insert and F5 only work while VR is running. Without VR, the game looks and plays exactly like the normal game.
 
 The mod's menu doesn't pause the game. To pause while you change settings, press Esc for the game's own menu first,
 then Insert. Changing the resolution causes a short stutter, and your changes are saved for next time.
@@ -123,6 +126,8 @@ game is closed.
 ## Turning VR off without uninstalling
 
 - To play without VR, start the game without starting SteamVR first. The mod stays idle until you press F11.
+- To switch VR off while playing, press Shift+F11. The game keeps running on the monitor (closing SteamVR would
+  close the game too).
 - To keep VR off, set `Enabled = false` under `[VR]` in `BepInEx\config\com.nivalisvr.plugin.cfg`.
 - To turn off all mods for a while, rename `winhttp.dll` in the game folder (for example to `winhttp.dll.off`).
   Rename it back to turn them on again.
